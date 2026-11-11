@@ -1,12 +1,15 @@
 Name:		junit5
 Version:	5.14.4
-Release:	1
+Release:	2
 %global platform_ver 1.14.4
+%global old_tag 5.12.2
+%global old_platform 1.12.2
 Summary:	JUnit 5 platform, Jupiter, and vintage engines
 Group:		Development/Java
 License:	EPL-2.0
 URL:		https://junit.org/junit5/
 Source0:	https://github.com/junit-team/junit-framework/archive/refs/tags/r%{version}.tar.gz#/junit-framework-%{version}.tar.gz
+Source1:	https://github.com/junit-team/junit-framework/archive/refs/tags/r%{old_tag}.tar.gz#/junit-framework-%{old_tag}.tar.gz
 BuildArch:	noarch
 BuildRequires:	python
 BuildRequires:	maven
@@ -29,13 +32,17 @@ BuildSystem:	maven
 %description
 JUnit 5.14.4 as separate jars: platform commons, engine, and launcher
 1.14.4, Jupiter API and engine 5.14.4, and the vintage engine that runs
-JUnit 4 tests on the platform. The upstream build is Gradle. This
-package writes a parentless Maven reactor, generates JRE.java from the
-upstream version list, and skips params, suite, and console. Tests need
-the Jupiter test fixtures, so they are not run.
+JUnit 4 tests on the platform. Platform launcher and engine %{old_platform}
+are installed beside %{platform_ver} for callers that pin that release.
+The upstream build is Gradle. This package writes a parentless Maven
+reactor, generates JRE.java from the upstream version list, and skips
+params, suite, and console. Tests need the Jupiter test fixtures, so
+they are not run.
 
 %prep
 %autosetup -n junit-framework-r%{version}
+%setup -q -T -D -a 1 -n junit-framework-r%{version}
+find junit-framework-r%{old_tag} \( -name '*.jar' -o -name '*.class' -o -name '*.so' -o -name '*.node' -o -name '*.wasm' \) -delete
 rm -rf junit-jupiter-api/src/main/kotlin
 python - <<'PY'
 from pathlib import Path
@@ -458,6 +465,153 @@ echo 'Automatic-Module-Name: org.junit.jupiter.engine' > manifest-extra.mf
 jar ufm junit-jupiter-engine/target/junit-jupiter-engine-%{version}.jar manifest-extra.mf
 echo 'Automatic-Module-Name: org.junit.vintage.engine' > manifest-extra.mf
 jar ufm junit-vintage-engine/target/junit-vintage-engine-%{version}.jar manifest-extra.mf
+
+old=junit-framework-r%{old_tag}
+test -d "$old/junit-platform-commons/src/main/java"
+export JAVA_HOME=%{_jvmdir}/java-openjdk
+export PATH="$JAVA_HOME/bin:$PATH"
+test -s %{_javadir}/apiguardian-api.jar
+test -s %{_javadir}/opentest4j/opentest4j.jar
+CP="%{_javadir}/apiguardian-api.jar:%{_javadir}/opentest4j/opentest4j.jar"
+compile_platform() {
+	mod=$1
+	classname=$2
+	modulename=$3
+	extra=$4
+	mkdir -p "out112/$mod/classes"
+	find "$old/$mod/src/main/java" -name '*.java' > "out112/$mod.list"
+	test -s "out112/$mod.list"
+	javac --release 8 -encoding UTF-8 -Xlint:-options -proc:none \
+		-cp "$CP:$extra" -d "out112/$mod/classes" @"out112/$mod.list"
+	if [ -d "$old/$mod/src/main/resources" ]; then
+		cp -a "$old/$mod/src/main/resources/." "out112/$mod/classes/"
+	fi
+	javap -v -classpath "out112/$mod/classes" "$classname" | grep -F -q 'major version: 52'
+	echo "Automatic-Module-Name: $modulename" > "out112/$mod.mf"
+	jar cfm "out112/$mod.jar" "out112/$mod.mf" -C "out112/$mod/classes" .
+	jar i "out112/$mod.jar"
+}
+compile_platform junit-platform-commons \
+	org.junit.platform.commons.util.Preconditions org.junit.platform.commons ""
+compile_platform junit-platform-engine \
+	org.junit.platform.engine.TestEngine org.junit.platform.engine \
+	out112/junit-platform-commons/classes
+compile_platform junit-platform-launcher \
+	org.junit.platform.launcher.core.LauncherFactory org.junit.platform.launcher \
+	"out112/junit-platform-commons/classes:out112/junit-platform-engine/classes"
+
+write_pom() {
+	mod=$1
+	deps=$2
+	cat > "out112/$mod.pom" <<END
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.junit.platform</groupId>
+  <artifactId>$mod</artifactId>
+  <version>%{old_platform}</version>
+  <name>$mod</name>
+  <description>JUnit Platform $mod %{old_platform}.</description>
+  <url>https://junit.org/junit5/</url>
+  <licenses>
+    <license>
+      <name>EPL-2.0</name>
+      <url>https://www.eclipse.org/legal/epl-2.0/</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+$deps
+</project>
+END
+}
+write_pom junit-platform-commons '  <dependencies>
+    <dependency>
+      <groupId>org.apiguardian</groupId>
+      <artifactId>apiguardian-api</artifactId>
+      <version>1.1.2</version>
+    </dependency>
+  </dependencies>'
+write_pom junit-platform-engine '  <dependencies>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-commons</artifactId>
+      <version>%{old_platform}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.opentest4j</groupId>
+      <artifactId>opentest4j</artifactId>
+      <version>1.3.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apiguardian</groupId>
+      <artifactId>apiguardian-api</artifactId>
+      <version>1.1.2</version>
+    </dependency>
+  </dependencies>'
+write_pom junit-platform-launcher '  <dependencies>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-commons</artifactId>
+      <version>%{old_platform}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-engine</artifactId>
+      <version>%{old_platform}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apiguardian</groupId>
+      <artifactId>apiguardian-api</artifactId>
+      <version>1.1.2</version>
+    </dependency>
+  </dependencies>'
+
+%install -a
+pin_side() {
+	artifact=$1
+	index="%{buildroot}/usr/share/sysjar/index/org.junit.platform/${artifact}.sysjar"
+	saved=$(mktemp)
+	cp -a "$index" "$saved"
+	sysjar install --buildroot %{buildroot} \
+		--artifact "out112/${artifact}.pom:out112/${artifact}.jar" \
+		--file-name "${artifact}-%{old_platform}" \
+		--filelist ".mfiles-${artifact}-112"
+	/bin/mv "$index" "%{buildroot}/usr/share/sysjar/index/org.junit.platform/${artifact}-%{old_platform}.sysjar"
+	/bin/cp -a "$saved" "$index"
+	rm -f "$saved"
+	sed -i "s|/usr/share/sysjar/index/org.junit.platform/${artifact}\\.sysjar|/usr/share/sysjar/index/org.junit.platform/${artifact}-%{old_platform}.sysjar|" ".mfiles-${artifact}-112"
+	grep -F -q '"version": "%{platform_ver}"' "$index"
+	grep -F -q '"version": "%{old_platform}"' "%{buildroot}/usr/share/sysjar/index/org.junit.platform/${artifact}-%{old_platform}.sysjar"
+	while IFS= read -r line; do
+		grep -qxF -- "$line" .mfiles || printf '%s\n' "$line" >> .mfiles
+	done < ".mfiles-${artifact}-112"
+}
+pin_side junit-platform-commons
+pin_side junit-platform-engine
+pin_side junit-platform-launcher
+
+%check -a
+export JAVA_HOME=%{_jvmdir}/java-openjdk
+export PATH="$JAVA_HOME/bin:$PATH"
+mkdir -p check
+cat > check/Smoke.java <<'EOF'
+import org.junit.platform.engine.UniqueId;
+import org.junit.platform.launcher.Launcher;
+import org.junit.platform.launcher.core.LauncherFactory;
+
+public class Smoke {
+    public static void main(String[] args) {
+        UniqueId id = UniqueId.forEngine("smoke");
+        Launcher launcher = LauncherFactory.create();
+        System.out.println(args[0] + " " + id.getEngineId().orElse("none") + " " + launcher.getClass().getSimpleName());
+    }
+}
+EOF
+CP="out112/junit-platform-commons.jar:out112/junit-platform-engine.jar:out112/junit-platform-launcher.jar:%{_javadir}/apiguardian-api.jar:%{_javadir}/opentest4j/opentest4j.jar"
+javac --release 8 -encoding UTF-8 -Xlint:-options -proc:none -cp "$CP" -d check check/Smoke.java
+java -cp "check:$CP" Smoke junit512_ok > check.log
+cat check.log
+grep -F -q 'junit512_ok smoke SessionPerRequestLauncher' check.log
 
 %files -f .mfiles
 %doc LICENSE.md README.md
